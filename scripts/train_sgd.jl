@@ -6,36 +6,33 @@ using Plots
 using DynamicalSystems
 using PredefinedDynamicalSystems: lorenz, roessler
 using Flux, Zygote
-using Distributions: Uniform
-## ====
-π32 = Float32(π)
-ds = lorenz([0.0, 10.0, 0.0]; σ=14.0, ρ=34.0, β=8 / 3)
-total_time = 100.0
-sampling_time = 0.02
-Tr, t = trajectory(ds, total_time; Ttr=2.2, Δt=sampling_time)
+using SparseArrays
+using Random
 
-function norm_(x; dims=2)
+## ====
+function norm_(x; dims=1)
     mn = mean(x, dims=dims)
     sd = std(x, dims=dims)
     return (x .- mn) ./ sd
 end
 
-# data as Float32
-X = norm_(Matrix{Float32}(Tr), dims=1)
-Y = circshift(X, (-1, 0))
+function gen_ds_trajectory(; total_time=100.0, dt=0.02)
+    ds = lorenz([0.0, 10.0, 0.0]; σ=14.0, ρ=34.0, β=8 / 3)
+    Tr, t = trajectory(ds, total_time; Ttr=2.2, Δt=dt)
+    # data as Float32
+    return norm_(Matrix{Float32}(Tr), dims=1)
+end
 
-## ====
-
-function res_forward(x, hprev; f=tanh)
-    u = x * f_in * R_in
-    # h = f.((1 - γ) * u + γ * hprev * R + b)
-    h = f.(u + hprev * R + b)
+function res_forward(x, hprev; f=relu)
+    u = x * f_in
+    # h = f.(u + (1 - α) * hprev + α * hprev * R)
+    h = (1 - α) * hprev + f.(u + α * hprev * R)
+    # h = f.(u + hprev * R + b)
     return h
 end
 
-function train_model(opt, ps, X; d=Uniform(-1.0f0, 1.0f0))
+function train_model(opt, ps, X)
     losses = []
-    # h = rand(d, 1, r_dim) .|> Float32
     h = zeros(Float32, 1, r_dim)
     for i in 1:size(X, 1)-1
         x = X[i:i, :]
@@ -43,7 +40,7 @@ function train_model(opt, ps, X; d=Uniform(-1.0f0, 1.0f0))
         h = res_forward(x, h)
         loss, grad = withgradient(ps) do
             ŷ = f_out(h[:])
-            Flux.mse(ŷ, y)# + 0.01f0 * norm(h, 2)
+            Flux.mse(ŷ, y)
         end
         Flux.update!(opt, ps, grad)
         push!(losses, loss)
@@ -56,40 +53,46 @@ function norm_eig(x)
     return x ./ λ
 end
 
-## ====
-
-in_dim = 16
-r_dim = 256
-out_dim = 3
-
-begin
-    f_in = randn(Float32, 3, in_dim)
-    R_in = randn(Float32, in_dim, r_dim)
-    R = randn(Float32, r_dim, r_dim) |> norm_eig
-    b = randn(Float32, 1, r_dim)
-    f_out = Dense(r_dim, out_dim, bias=false)
-    # ps = Flux.params(f_out)
-    ps = Flux.params(f_out)
+function gen_sparse_R(r_dim; ρ=0.1)
+    r_init = sprandn(Float32, r_dim, r_dim, ρ)
+    r_init = Matrix{Float32}(r_init) |> norm_eig
+    return sparse(r_init)
 end
-
-opt = ADAM(1e-5)
-
-@time ls = vcat([train_model(opt, ps, X) for _ in 1:20]...)
-plot(ls)
-
 
 sg(x; d=1000.0f0) = Float32(σ(x - d))
 
+## ====
+
+r_dim = 300
+out_dim = 3
+
+X = gen_ds_trajectory(total_time=150.0)
+
 begin
+    Random.seed!(42)
+    f_in = randn(Float32, 3, r_dim)
+    f_in = f_in ./ norm(f_in)
+    R = gen_sparse_R(r_dim, ρ=0.15)
+    f_out = Dense(r_dim, out_dim)
+    ps = Flux.params(f_out)
+    α = 0.5f0
+end
+
+opt = ADAM(4e-5)
+
+@time ls = vcat([train_model(opt, ps, X) for _ in 1:10]...)
+plot(ls)
+
+begin
+    tp = 2000
     hs, yhats, xs = [], [], []
-    # h = rand(Uniform(-1.0f0, 1.0f0), 1, r_dim) .|> Float32
     h = zeros(Float32, 1, r_dim)
     push!(hs, h |> cpu)
     ŷ = zeros(Float32, 1, 3)
     tlen = size(X, 1) - 1
     for i in 1:tlen
         inp = X[i:i, :]
-        γ = sg(i; d=2000.0f0)
+        γ = sg(i; d=Float32(tp))
         x = (1 - γ) * inp + γ * reshape(ŷ, 1, :)
         h = res_forward(x, h)
         ŷ = f_out(h[:])
@@ -99,16 +102,36 @@ begin
 
     H = vcat(hs...)
     ys = Matrix(hcat(yhats...)')
+
+    e = mse(ys[tp.+1:end, :], X[tp.+2:end, :])[:]
+    plot(e)
 end
 
 begin
-    dim = 2
-    tspan = 1900:3000
+    dim = 3
+    tspan = 1500:5000
     plot(ys[tspan, dim], label="pred")
-    plot!(cpu(Y)[tspan, dim], label="data")
+    plot!(X[tspan.+1, dim], label="data")
 end
 
-X
+p = begin
+    # plot3d(ys[1:tp, 1], ys[1:tp, 2], ys[1:tp, 3], linestyle=:dash)
+    plot3d(X[tp.+2:end, 1], X[tp.+2:end, 2], X[tp.+2:end, 3])
+    plot3d!(ys[tp.+1:end, 1], ys[tp.+1:end, 2], ys[tp.+1:end, 3], linestyle=:dash)
+
+end
+
+mse(x, y; dims=2) = mean((x - y) .^ 2, dims=dims)
+
+e = mse(ys[tp.+1:end, :], X[tp.+2:end, :])[:]
+plot(e)
+
+ys1 = ys
+
+heatmap(H[tspan, :]')
+
+histogram(H[1:2000, :][:])
+
 plot3d(X[:, 1], X[:, 2], X[:, 3])
 
 
