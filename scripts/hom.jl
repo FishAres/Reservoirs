@@ -16,34 +16,6 @@ function norm_(x; dims=1)
     return (x .- mn) ./ sd
 end
 
-# ds = lorenz([0.0, 10.0, 0.0]; σ=14.0, ρ=34.0, β=8 / 3)
-using Distributions
-
-u0 = rand(Uniform(-2.0, 2.0), 3)
-p = rand(Uniform(0, 6), 3)
-
-ds = PredefinedDynamicalSystems.roessler(u0; a=p[1], b=p[2], c=p[3])
-Tr, t = trajectory(ds, 100.0; Ttr=2.2, Δt=0.02)
-X = norm_(Matrix{Float32}(Tr), dims=1)
-
-plot3d(X[:, 1], X[:, 2], X[:, 3])
-
-
-
-
-
-function generate_ds(ds_type::PredefinedDynamicalSystems.roessler)
-
-    ds = ds_type(u0=[])
-    Tr, t = trajectory(ds, total_time; Ttr=2.2, Δt=dt)
-
-    norm_(Matrix{Float32}(Tr), dims=1)
-end
-
-m = methods(PredefinedDynamicalSystems.roessler)
-
-
-
 
 function gen_ds_trajectory(; total_time=100.0, dt=0.02)
     ds = lorenz([0.0, 10.0, 0.0]; σ=14.0, ρ=34.0, β=8 / 3)
@@ -52,10 +24,11 @@ function gen_ds_trajectory(; total_time=100.0, dt=0.02)
     return norm_(Matrix{Float32}(Tr), dims=1)
 end
 
-function res_forward(x, hprev; f=relu)
+function res_forward(x, hprev, hs; f=relu, η=0.4f0)
     u = x * f_in
     # h = f.(u + (1 - α) * hprev + α * hprev * R)
-    h = (1 - α) * hprev + f.(u + α * hprev * R)
+    h = (1 - α) * hprev + f.(u + α * hprev * R) - hs
+    hs = 0.1f0 * (h .- η)
     # h = f.(u + hprev * R + b)
     return h
 end
